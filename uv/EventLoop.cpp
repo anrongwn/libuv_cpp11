@@ -1,30 +1,30 @@
-/*
-   Copyright 2017, orcaer@yeah.net  All rights reserved.
+Ôªø/*
+   Copyright ¬© 2017-2019, orcaer@yeah.net  All rights reserved.
 
    Author: orcaer@yeah.net
     
-   Last modified: 2018-4-18
+   Last modified: 2019-6-17
     
-   Description: https://github.com/wlgq2/libuv_cpp11
+   Description: https://github.com/wlgq2/uv-cpp
 */
 
-#include "EventLoop.h"
-#include "TcpConnection.h"
-#include "Async.h"
+#include "include/EventLoop.h"
+#include "include/TcpConnection.h"
+#include "include/Async.h"
 
 using namespace uv;
 
 EventLoop::EventLoop()
-    :isRun(false)
+    :EventLoop(EventLoop::Mode::New)
 {
-    loop_ = new uv_loop_t();
-    ::uv_loop_init(loop_);
 }
 
 EventLoop::EventLoop(EventLoop::Mode mode)
-    :isRun(false)
+    : isRun_(false),
+    loop_(nullptr),
+    async_(nullptr)
 {
-    if (mode == EventLoop::New)
+    if (mode == EventLoop::Mode::New)
     {
         loop_ = new uv_loop_t();
         ::uv_loop_init(loop_);
@@ -33,24 +33,26 @@ EventLoop::EventLoop(EventLoop::Mode mode)
     {
         loop_ = uv_default_loop();
     }
+    async_ = new Async(this);
 }
 
 EventLoop::~EventLoop()
 {
     if (loop_ != uv_default_loop())
-    {
+    {   
         uv_loop_close(loop_);
         delete loop_;
+        delete async_;
     }
 }
 
-EventLoop* uv::EventLoop::DefalutLoop()
+EventLoop* uv::EventLoop::DefaultLoop()
 {
-    static EventLoop* defaultLoop = new uv::EventLoop(uv::EventLoop::Mode::Default);
-    return defaultLoop;
+    static EventLoop defaultLoop(EventLoop::Mode::Default);
+    return &defaultLoop;
 }
 
-uv_loop_t* EventLoop::hanlde()
+uv_loop_t* EventLoop::handle()
 {
     return loop_;
 }
@@ -58,29 +60,29 @@ uv_loop_t* EventLoop::hanlde()
 int EventLoop::run()
 {
     loopThreadId_ = std::this_thread::get_id();
-    isRun = true;
+    isRun_ = true;
     return ::uv_run(loop_, UV_RUN_DEFAULT);
 }
 
 int uv::EventLoop::runNoWait()
 {
     loopThreadId_ = std::this_thread::get_id();
-    isRun = true;
+    isRun_ = true;
     return ::uv_run(loop_, UV_RUN_NOWAIT);
 }
 
 
 bool EventLoop::isRunInLoopThread()
 {
-    if (isRun)
+    if (isRun_)
     {
         return std::this_thread::get_id() == loopThreadId_;
     }
-    //EventLoopŒ¥‘À––.
+    //EventLoopÊú™ËøêË°å.
     return false;
 }
 
-void uv::EventLoop::runInThisLoop(const std::function<void()>& func)
+void uv::EventLoop::runInThisLoop(const DefaultCallback func)
 {
     if (nullptr == func)
         return;
@@ -90,16 +92,7 @@ void uv::EventLoop::runInThisLoop(const std::function<void()>& func)
         func();
         return;
     }
-    std::function<void()>* funcptr = new std::function<void()>();
-    *funcptr = func;
-    uv::Async<std::function<void()>*>* handle = new uv::Async<std::function<void()>*>(this,
-        [this](uv::Async<std::function<void()>*>* handle, std::function<void()>* funcptr)
-    {
-        (*funcptr)();
-        delete funcptr;
-        delete handle;
-    }, funcptr);
-    handle->runInLoop();
+    async_->runInThisLoop(func);
 }
 
 const char* EventLoop::GetErrorMessage(int status)

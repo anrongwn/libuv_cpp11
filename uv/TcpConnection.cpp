@@ -1,17 +1,18 @@
-/*
-Copyright 2017, orcaer@yeah.net  All rights reserved.
+Ôªø/*
+Copyright ¬© 2017-2019, orcaer@yeah.net  All rights reserved.
 
 Author: orcaer@yeah.net
 
-Last modified: 2017-11-8
+Last modified: 2019-12-31
 
-Description: https://github.com/wlgq2/libuv_cpp11
+Description: https://github.com/wlgq2/uv-cpp
 */
 
-#include "TcpConnection.h"
-#include "TcpServer.h"
-#include "Async.h"
-#include "LogInterface.h"
+#include "include/TcpConnection.h"
+#include "include/TcpServer.h"
+#include "include/Async.h"
+#include "include/LogWriter.h"
+#include "include/GlobalConfig.h"
 
 using namespace std;
 using namespace std::chrono;
@@ -42,23 +43,24 @@ struct WriteArgs
 
 TcpConnection:: ~TcpConnection()
 {
-    delete handle_;
 }
 
-TcpConnection::TcpConnection(EventLoop* loop, std::string& name, uv_tcp_t* client, bool isConnected)
+TcpConnection::TcpConnection(EventLoop* loop, std::string& name, UVTcpPtr client, bool isConnected)
     :name_(name),
     connected_(isConnected),
     loop_(loop),
     handle_(client),
+    buffer_(nullptr),
     onMessageCallback_(nullptr),
     onConnectCloseCallback_(nullptr),
     closeCompleteCallback_(nullptr)
 {
     handle_->data = static_cast<void*>(this);
-    ::uv_read_start((uv_stream_t*)client,
+    ::uv_read_start((uv_stream_t*)handle_.get(),
         [](uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
     {
-        buf->base = new char[suggested_size];
+        auto conn = static_cast<TcpConnection*>(handle->data);
+        buf->base = conn->resizeData(suggested_size);
 #if _MSC_VER
         buf->len = (ULONG)suggested_size;
 #else
@@ -66,10 +68,15 @@ TcpConnection::TcpConnection(EventLoop* loop, std::string& name, uv_tcp_t* clien
 #endif
     },
         &TcpConnection::onMesageReceive);
+    if (GlobalConfig::BufferModeStatus == GlobalConfig::ListBuffer)
+    {
+        buffer_ = std::make_shared<ListBuffer>();
+    }
+    else if(GlobalConfig::BufferModeStatus == GlobalConfig::CycleBuffer)
+    {
+        buffer_ = std::make_shared<CycleBuffer>();
+    }
 }
-
-
-
 
 void TcpConnection::onMessage(const char* buf, ssize_t size)
 {
@@ -85,15 +92,20 @@ void TcpConnection::onSocketClose()
 
 void TcpConnection::close(std::function<void(std::string&)> callback)
 {
+    onMessageCallback_ = nullptr;
+    onConnectCloseCallback_ = nullptr;
+    closeCompleteCallback_ = nullptr;
+
     closeCompleteCallback_ = callback;
-    if (::uv_is_active((uv_handle_t*)handle_)) 
+    uv_tcp_t* ptr = handle_.get();
+    if (::uv_is_active((uv_handle_t*)ptr))
     {
-        ::uv_read_stop((uv_stream_t*)handle_);
+        ::uv_read_stop((uv_stream_t*)ptr);
     }
-    if (::uv_is_closing((uv_handle_t*)handle_) == 0)
+    if (::uv_is_closing((uv_handle_t*)ptr) == 0)
     {
-        //libuv ‘⁄loop¬÷—Ø÷–ª·ºÏ≤‚πÿ±’æ‰±˙£¨deleteª·µº÷¬≥Ã–Ú“Ï≥£ÕÀ≥ˆ°£
-        ::uv_close((uv_handle_t*)handle_,
+        //libuv Âú®loopËΩÆËØ¢‰∏≠‰ºöÊ£ÄÊµãÂÖ≥Èó≠Âè•ÊüÑÔºådelete‰ºöÂØºËá¥Á®ãÂ∫èÂºÇÂ∏∏ÈÄÄÂá∫„ÄÇ
+        ::uv_close((uv_handle_t*)ptr,
             [](uv_handle_t* handle)
         {
             auto connection = static_cast<TcpConnection*>(handle->data);
@@ -114,10 +126,11 @@ int TcpConnection::write(const char* buf, ssize_t size, AfterWriteCallback callb
         WriteReq* req = new WriteReq;
         req->buf = uv_buf_init(const_cast<char*>(buf), static_cast<unsigned int>(size));
         req->callback = callback;
-        rst = ::uv_write((uv_write_t*)req, (uv_stream_t*)handle_, &req->buf, 1,
+        auto ptr = handle_.get();
+        rst = ::uv_write((uv_write_t*)req, (uv_stream_t*)ptr, &req->buf, 1,
             [](uv_write_t *req, int status)
         {
-            WriteReq *wr = (WriteReq*)req;
+            WriteReq* wr = (WriteReq*)req;
             if (nullptr != wr->callback)
             {
                 struct WriteInfo info;
@@ -126,17 +139,17 @@ int TcpConnection::write(const char* buf, ssize_t size, AfterWriteCallback callb
                 info.status = status;
                 wr->callback(info);
             }
-            //delete [] (wr->buf.base);
             delete wr;
         });
         if (0 != rst)
         {
-            uv::Log::Instance()->error(std::string("write data error:"+std::to_string(rst)));
+            uv::LogWriter::Instance()->error(std::string("write data error:"+std::to_string(rst)));
             if (nullptr != callback)
             {
                 struct WriteInfo info = { rst,const_cast<char*>(buf),static_cast<unsigned long>(size) };
                 callback(info);
             }
+            delete req;
         }
     }
     else
@@ -153,34 +166,32 @@ int TcpConnection::write(const char* buf, ssize_t size, AfterWriteCallback callb
 
 void TcpConnection::writeInLoop(const char* buf, ssize_t size, AfterWriteCallback callback)
 {
-    if (loop_->isRunInLoopThread())
+    std::weak_ptr<uv::TcpConnection> conn = shared_from_this();
+    loop_->runInThisLoop(
+        [conn,buf,size, callback]()
     {
-        write(buf, size, callback);
-        return;
-    }
-
-    struct WriteArgs* writeArg = new struct WriteArgs(shared_from_this(), buf, size, callback);
-    Async<struct WriteArgs*>* async = new Async<struct WriteArgs*>(loop_,
-        [this](Async<struct WriteArgs*>* handle, struct WriteArgs * data)
-    {
-        auto connection = data->connection;
-        connection->write(data->buf, data->size, data->callback);
-        delete data;
-        delete handle;
-    },
-        writeArg);
-    async->runInLoop();
+        std::shared_ptr<uv::TcpConnection> ptr = conn.lock();
+        if (ptr != nullptr)
+        {
+            ptr->write(buf, size, callback);
+        }
+        else
+        {
+            struct WriteInfo info = { WriteInfo::Disconnected,const_cast<char*>(buf),static_cast<unsigned long>(size) };
+            callback(info);
+        }
+    });
 }
 
 
-void TcpConnection::setElement(shared_ptr<ConnectionElement> conn)
+void TcpConnection::setWrapper(ConnectionWrapperPtr wrapper)
 {
-    element_ = conn;
+    wrapper_ = wrapper;
 }
 
-std::weak_ptr<ConnectionElement> TcpConnection::Element()
+std::shared_ptr<ConnectionWrapper> TcpConnection::getWrapper()
 {
-    return element_;
+    return wrapper_.lock();
 }
 
 void  TcpConnection::onMesageReceive(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf)
@@ -189,13 +200,11 @@ void  TcpConnection::onMesageReceive(uv_stream_t* client, ssize_t nread, const u
     if (nread > 0)
     {
         connection->onMessage(buf->base, nread);
-        delete[](buf->base);
     }
     else if (nread < 0)
     {
         connection->setConnectStatus(false);
-        uv::Log::Instance()->error( uv_err_name((int)nread));
-        delete[](buf->base);
+        uv::LogWriter::Instance()->error( uv_err_name((int)nread));
 
         if (nread != UV_EOF)
         {
@@ -216,7 +225,6 @@ void  TcpConnection::onMesageReceive(uv_stream_t* client, ssize_t nread, const u
     else
     {
         /* Everything OK, but nothing read. */
-        delete[](buf->base);
     }
 
 }
@@ -249,17 +257,18 @@ bool uv::TcpConnection::isConnected()
     return connected_;
 }
 
-std::string & uv::TcpConnection::Name()
+const std::string& uv::TcpConnection::Name()
 {
     return name_;
 }
 
-int uv::TcpConnection::appendToBuffer(const char* data, int size)
+char* uv::TcpConnection::resizeData(size_t size)
 {
-    return buffer_.append(data, size);
+    data_.resize(size);
+    return const_cast<char*>(data_.c_str());
 }
 
-int uv::TcpConnection::readFromBuffer(Packet& packet)
+PacketBufferPtr uv::TcpConnection::getPacketBuffer()
 {
-    return buffer_.read(packet);
+    return buffer_;
 }

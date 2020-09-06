@@ -1,30 +1,31 @@
-/*
-   Copyright 2017, orcaer@yeah.net  All rights reserved.
+﻿/*
+   Copyright © 2017-2019, orcaer@yeah.net  All rights reserved.
 
    Author: orcaer@yeah.net
     
    Last modified: 2018-8-23
     
-   Description: https://github.com/wlgq2/libuv_cpp11
+   Description: https://github.com/wlgq2/uv-cpp
 */
 
-#include "Signal.h"
-#include "LogInterface.h"
+#include "include/Signal.h"
+#include "include/LogWriter.h"
+#include "include/EventLoop.h"
 
 using namespace uv;
 using namespace std;
 
 Signal::Signal(EventLoop* loop, int sig, SignalHandle handle)
     :signal_(new uv_signal_t),
-    hanlde_(handle),
+    handle_(handle),
     closeCallback_(nullptr)
 {
-    ::uv_signal_init(loop->hanlde(), signal_);
+    ::uv_signal_init(loop->handle(), signal_);
     signal_->data = static_cast<void*>(this);
     ::uv_signal_start(signal_, &Signal::onSignal, sig);
 }
 
-void uv::Signal::close(std::function<void()> callback)
+void uv::Signal::close(DefaultCallback callback)
 {
     closeCallback_ = callback;
     if (uv_is_closing((uv_handle_t*)signal_) == 0)
@@ -49,14 +50,14 @@ Signal::~Signal()
 
 void Signal::setHandle(SignalHandle handle)
 {
-    hanlde_ = handle;
+    handle_ = handle;
 }
 
 bool Signal::handle(int signum)
 {
-    if (hanlde_)
+    if (handle_)
     {
-        hanlde_(signum);
+        handle_(signum);
         return true;
     }
     return false;
@@ -80,6 +81,6 @@ void Signal::onSignal(uv_signal_t* handle, int signum)
     auto ptr = static_cast <Signal*>(handle->data);
     if (!ptr->handle(signum))
     {
-        uv::Log::Instance()->warn( std::string("non defined signal handle :")+std::to_string(signum));
+        uv::LogWriter::Instance()->warn( std::string("non defined signal handle :")+std::to_string(signum));
     }
 }

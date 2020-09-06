@@ -1,20 +1,112 @@
-# libuv_cpp11
-<br>对libuv的C++风格封装,用于线上项目，做过压测。</br>
+# uv-cpp
+<a href="https://github.com/wlgq2/uv-cpp/releases"><img src="https://img.shields.io/github/release/wlgq2/uv-cpp.svg" alt="Github release"></a>
+[![Platform](https://img.shields.io/badge/platform-%20%20%20%20Linux,%20Windows-green.svg?style=flat)](https://github.com/wlgq2/uv-cpp)
+[![License](https://img.shields.io/badge/license-%20%20MIT-yellow.svg?style=flat)](LICENSE)
+[![Project Status: Active – The project has reached a stable, usable state and is being actively developed.](http://www.repostatus.org/badges/latest/active.svg)](http://www.repostatus.org/#active)
 
-
-* TCP相关类封装：`TcpServer`、`TcpClient`、`TcpConnection`、`TcpAccept`。及把C风格回调改为C++11风格的回调（支持非静态类成员函数及lambda）。
-* `Timer`及`TimerWheel`：定时器及时间复杂度为O(1)的心跳超时踢出机制。
-* `Async`：异步机制封装，由于libuv的所有api非线程安全，建议使用writeInLoop接口代替直接write（writeInLoop会检查当前调用的线程，如果在loop线程中调用则直接write，否则把write加到loop线程中执行）。
-* libuv信号封装。   
-* `Packet`与`PacketBuffer`：包与缓存，发送/接受包，用于解决TCP残包/粘包问题，由ListBuffer和CycleBuffer两种实现，可用宏配置（前者空间友好，后者时间友好）。
-* Log日志输出接口，可绑定至自定义Log库。
+<br>Language Translations:</br>
+* [Englishi](README.md)
+* [简体中文](README_cn.md)
 ** **
-简单性能测试：单线程1k字节ping-pong。
-<br>环境：Intel Core i5 6402 + ubuntu14.04.5 + gcc5.5.0 + libuv1.22.0 + O2优化</br>
+uv-cpp is a simple interface, high-performance network library based on C++11.
 
-   libuv_cpp | no use PacketBuffer|CycleBuffer|ListBuffer|
-:---------:|:--------:|:--------:|:--------:|
-次/秒     | 192857 |141487|12594|
+## Dependencies
+ * [libuv][1]
+## Features
+* C++11 functional/bind style callback instead of C-style function pointer.
+* `TCP` and `UDP` wrapper.
+* `DNS`and`Http`：DNS query and http support，Http routing based on radix tree.
+* `Timer`and`TimerWheel`：Heartbeat timeout judgment with time complexity of O(1).
+* `Async`：libuv async wrapper，but optimized the [problem][2] of calling multiple times  but callback  will only be called once. 
+* `Packet`and`PacketBuffer`：Send and receive packet of Tcp data stream. Support custom data packet structure (such as [uvnsq][3])
+* Log interface.
 ** **
-**！对于诸如`uv::Timer`,`uv::TcpClient`等对象的释放需要调用close接口并在回调函数中释放对象,否则可能会出错。**
-<br>一点微小的工作。</br>
+## Build Instructions
+* VS2017 (windows)
+* Codeblocks (linux)
+* CMake (linux)
+** **
+## Benchmark
+### ping-pong VS boost.asio-1.67
+<br>environment：Intel Core i5 8265U + debian8 + gcc8.3.0 + libuv1.30.0 + '-O2'</br>
+
+ size peer pack | 1K bytes|2K bytes|4K bytes|8K bytes|
+:---------:|:--------:|:--------:|:--------:|:--------:|
+uv-cpp | 16138 kbyte|32071 kbyte|59264 kbyte|123813 kbyte|
+boost.asio | 16119 kbyte|31566 kbyte|58322 kbyte|126210 kbyte|
+
+![asio1](https://github.com/wlgq2/uv_cpp_res/blob/master/vs_asio/one_no_data.png)
+
+<br>environment：i5-8265U + 4G memory + 4k bytes ping-pong</br>
+concurrency| 10|100|1000|5000|
+:---------:|:--------:|:--------:|:--------:|:--------:|
+uv-cpp | 654282 kbyte|591869 kbyte|401500 kbyte|412855 kbyte|
+boost.asio | 633818 kbyte|585716 kbyte|371386 kbyte|382402 kbyte|
+
+![asio2](https://github.com/wlgq2/uv_cpp_res/blob/master/vs_asio/concurrency_no_data.png)
+
+### Apache bench VS nginx-1.14.2
+<br>environment：Intel Core i5 8265U + debian8 + gcc8.3.0 + libuv1.30.0 + '-O2'</br>
+<br>1000 concurrency && 100000 request.</br>
+![uv_http](https://github.com/wlgq2/uv_cpp_res/blob/master/vs_nginx/uv_http_1000.png)
+![nginx_http](https://github.com/wlgq2/uv_cpp_res/blob/master/vs_nginx/nginx_http_1000.png)
+
+## Quick start
+A simple echo server
+```C++
+#include <iostream>
+#include <uv/include/uv11.h>
+
+int main(int argc, char** args)
+{
+    uv::EventLoop* loop = uv::EventLoop::DefaultLoop();
+	
+    uv::TcpServer server(loop);
+    server.setMessageCallback([](uv::TcpConnectionPtr ptr,const char* data, ssize_t size)
+    {
+        ptr->write(data, size, nullptr);
+    });
+    //server.setTimeout(60); //heartbeat timeout.
+	
+    uv::SocketAddr addr("0.0.0.0", 10005, uv::SocketAddr::Ipv4);
+    server.bindAndListen(addr);
+    loop->run();
+}
+
+```
+
+A simple http service router which based on radix tree.
+```C++
+int main(int argc, char** args)
+{
+    uv::EventLoop loop;
+    uv::http::HttpServer::SetBufferMode(uv::GlobalConfig::BufferMode::CycleBuffer);
+
+    uv::http::HttpServer server(&loop);
+	
+    //example:  127.0.0.1:10010/test
+    server.Get("/test",std::bind(&func1,std::placeholders::_1,std::placeholders::_2));
+    
+    //example:  127.0.0.1:10010/some123abc
+    server.Get("/some*",std::bind(&func2, std::placeholders::_1, std::placeholders::_2));
+    
+    //example:  127.0.0.1:10010/value:1234
+    server.Get("/value:",std::bind(&func3, std::placeholders::_1, std::placeholders::_2));
+    
+    //example:  127.0.0.1:10010/sum?param1=100&param2=23
+    server.Get("/sum",std::bind(&func4, std::placeholders::_1, std::placeholders::_2));
+    
+    uv::SocketAddr addr("127.0.0.1", 10010);
+    server.bindAndListen(addr);
+    loop.run();
+}
+
+```
+More examples [here][4].
+<br>API's document [here][5].  </br>
+
+[1]: https://github.com/libuv/libuv
+[2]: http://docs.libuv.org/en/v1.x/async.html
+[3]: https://github.com/wlgq2/uvnsq
+[4]: https://github.com/wlgq2/uv-cpp/tree/master/examples
+[5]: https://github.com/wlgq2/uv-cpp/tree/master/doc
